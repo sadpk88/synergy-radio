@@ -9,8 +9,11 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -56,21 +59,45 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView = WebView(this)
+        // 2. Initialisation de la WebView avec focus tactile complet (débloque les clics)
+        webView = WebView(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            isClickable = true
+            isFocusable = true
+            isFocusableInTouchMode = true
+            requestFocus(View.FOCUS_DOWN)
+        }
         setContentView(webView)
 
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             cacheMode = WebSettings.LOAD_DEFAULT
             allowFileAccess = true
+            allowContentAccess = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            setSupportZoom(false)
         }
 
         webView.webViewClient = WebViewClient()
-        // Évite le blocage du thread UI par les alertes/prompts JavaScript
+
+        // Évite le blocage du thread UI par les alertes/prompts/confirms JavaScript
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                result?.confirm()
+                return true
+            }
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                result?.confirm()
+                return true
+            }
             override fun onJsPrompt(
                 view: WebView?, url: String?, message: String?, defaultValue: String?, result: JsPromptResult?
             ): Boolean {
@@ -94,9 +121,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         webView.onResume()
+        webView.resumeTimers()
     }
 
     override fun onPause() {
+        webView.pauseTimers()
         webView.onPause()
         super.onPause()
     }
@@ -117,27 +146,23 @@ class MainActivity : AppCompatActivity() {
                 putExtra("url", url)
                 putExtra("startPlaying", true)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                this@MainActivity.startForegroundService(intent)
-            } else {
-                this@MainActivity.startService(intent)
-            }
+            startRadioService(intent)
         }
 
         @JavascriptInterface
         fun pauseStream() {
-            val intent = Intent(RadioService.ACTION_PAUSE).apply {
-                setPackage(packageName)
+            val intent = Intent(this@MainActivity, RadioService::class.java).apply {
+                action = RadioService.ACTION_PAUSE
             }
-            sendBroadcast(intent)
+            startRadioService(intent)
         }
 
         @JavascriptInterface
         fun toggleStream() {
-            val intent = Intent(RadioService.ACTION_TOGGLE).apply {
-                setPackage(packageName)
+            val intent = Intent(this@MainActivity, RadioService::class.java).apply {
+                action = RadioService.ACTION_TOGGLE
             }
-            sendBroadcast(intent)
+            startRadioService(intent)
         }
 
         @JavascriptInterface
@@ -158,6 +183,14 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun stopForegroundService() {
             pauseStream()
+        }
+
+        private fun startRadioService(intent: Intent) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                this@MainActivity.startForegroundService(intent)
+            } else {
+                this@MainActivity.startService(intent)
+            }
         }
     }
 

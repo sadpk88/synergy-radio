@@ -21,7 +21,9 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 
 /**
  * Service d'arrière-plan avec ExoPlayer Media3 pour Synergy Radio.
@@ -34,8 +36,8 @@ class RadioService : Service() {
     private var mediaSession: MediaSessionCompat? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // URL par défaut de votre flux SonicPanel / IceCast
-    private var streamUrl = "https://fire.doscast.com/8080/stream"
+    // URL par défaut du flux IceCast / SonicPanel
+    private var streamUrl = "http://fire.doscast.com:8080/stream"
     private var trackTitle = "Synergy Radio"
     private var trackArtist = "En direct"
 
@@ -70,31 +72,52 @@ class RadioService : Service() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SynergyRadio::WakeLock")
 
-        // Initialisation d'ExoPlayer configuré pour la radio
+        // Source HTTP robuste avec redirection cross-protocol (HTTP <-> HTTPS) et timeout adapté à Icecast
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15000)
+            .setReadTimeoutMs(15000)
+            .setUserAgent("SynergyRadio/1.1 (Android)")
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
+
+        // Configuration d'attributs audio multimédia
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        exoPlayer = ExoPlayer.Builder(this).build().apply {
-            setAudioAttributes(audioAttributes, true) // Gère le focus audio (baisse le son pendant un appel/GPS)
-            setHandleAudioBecomingNoisy(true) // Met en pause si on débranche les écouteurs
-            addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    updateMediaSessionState(isPlaying)
-                    updateNotification()
-                    broadcastStateToWebView(isPlaying)
-                }
+        exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
+                setAudioAttributes(audioAttributes, true) // Focus audio automatique
+                setHandleAudioBecomingNoisy(true) // Pause si débranchement écouteurs
+                addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        updateMediaSessionState(isPlaying)
+                        updateNotification()
+                        broadcastStateToWebView(isPlaying)
+                    }
 
-                override fun onPlayerError(error: PlaybackException) {
-                    // Reconnexion automatique au flux en cas de micro-coupure réseau
-                    exoPlayer?.prepare()
-                    exoPlayer?.play()
-                }
-            })
-        }
+                    override fun onPlayerError(error: PlaybackException) {
+                        error.printStackTrace()
+                        // Bascule automatique entre http et https en cas d'erreur de certificat ou de port
+                        if (streamUrl.startsWith("https://")) {
+                            streamUrl = streamUrl.replace("https://", "http://")
+                        } else if (streamUrl.contains("/8080/")) {
+                            streamUrl = streamUrl.replace("/8080/", ":8080/")
+                        }
+                        exoPlayer?.let { player ->
+                            val mediaItem = MediaItem.fromUri(Uri.parse(streamUrl))
+                            player.setMediaItem(mediaItem)
+                            player.prepare()
+                            player.play()
+                        }
+                    }
+                })
+            }
 
-        // Configuration de la MediaSession pour l'écran de verrouillage et les montres connectées
+        // Configuration de la MediaSession pour l'écran de verrouillage et appareils Bluetooth
         mediaSession = MediaSessionCompat(this, "SynergyRadioSession").apply {
             isActive = true
             setCallback(object : MediaSessionCompat.Callback() {
@@ -118,19 +141,24 @@ class RadioService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
         val targetUrl = intent?.getStringExtra("url")
         if (!targetUrl.isNullOrEmpty()) {
             streamUrl = targetUrl
         }
 
-        // Lancer la notification de premier plan immédiatement pour respecter les exigences d'Android 12/14
+        // Démarrer la notification de premier plan immédiatement pour satisfaire Android 8-14
         startForeground(NOTIFICATION_ID, buildNotification())
 
-        if (action == ACTION_PLAY || intent?.getBooleanExtra("startPlaying", false) == true) {
-            playRadio()
-        } else if (action == ACTION_PAUSE) {
-            pauseRadio()
+        val action = intent?.action
+        when (action) {
+            ACTION_PLAY -> playRadio()
+            ACTION_PAUSE -> pauseRadio()
+            ACTION_TOGGLE -> togglePlayPause()
+            else -> {
+                if (intent?.getBooleanExtra("startPlaying", false) == true) {
+                    playRadio()
+                }
+            }
         }
 
         return START_STICKY
@@ -204,9 +232,10 @@ class RadioService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val toggleIntent = PendingIntent.getBroadcast(
+        // Utiliser PendingIntent.getService pour piloter directement le Service sans dépendre d'un broadcast externe
+        val toggleIntent = PendingIntent.getService(
             this, 1,
-            Intent(ACTION_TOGGLE).apply { setPackage(packageName) },
+            Intent(this, RadioService::class.java).apply { action = ACTION_TOGGLE },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
