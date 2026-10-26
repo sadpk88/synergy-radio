@@ -1,0 +1,72 @@
+name: Build Synergy Radio APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Configuration automatique des dépôts et du trafic réseau
+        run: |
+          # 1. S'assure que le dossier assets existe et que index.html est présent
+          mkdir -p app/src/main/assets
+          if [ -f "index.html" ]; then
+            cp index.html app/src/main/assets/index.html
+          fi
+
+          # 2. Autorise le trafic HTTP en clair pour le port 8080 dans le Manifest
+          MANIFEST_PATH="app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST_PATH" ] && ! grep -q "usesCleartextTraffic" "$MANIFEST_PATH"; then
+            sed -i 's/<application/<application android:usesCleartextTraffic="true"/' "$MANIFEST_PATH"
+          fi
+
+          # 3. Crée un settings.gradle propre avec les dépôts Google et Maven Central obligatoires
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "SynergyRadio"
+          include ':app'
+          EOF
+
+          # 4. Configure gradle.properties pour AndroidX
+          echo "android.useAndroidX=true" > gradle.properties
+          echo "org.gradle.jvmargs=-Xmx2048m" >> gradle.properties
+
+      - name: Installation de Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Générer l'APK Debug
+        run: gradle assembleDebug
+
+      - name: Télécharger l'APK compilé (Artifact)
+        uses: actions/upload-artifact@v5
+        with:
+          name: Synergy-Radio-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
